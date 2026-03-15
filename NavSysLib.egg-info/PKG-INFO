@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: NavSysLib
+Version: 0.1
+Summary: NMEA sentence parsing library for navigation exercises
+Author: Magnus Carlsen Haaland
+Author-email: 
+Requires-Python: >=3.8
+Dynamic: author
+Dynamic: requires-python
+Dynamic: summary

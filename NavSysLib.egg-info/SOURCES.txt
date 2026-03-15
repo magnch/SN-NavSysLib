@@ -1,0 +1,11 @@
+README.md
+setup.py
+NavSysLib/Coords.py
+NavSysLib/NMEALog.py
+NavSysLib/NMEASentence.py
+NavSysLib/__init__.py
+NavSysLib/utilities.py
+NavSysLib.egg-info/PKG-INFO
+NavSysLib.egg-info/SOURCES.txt
+NavSysLib.egg-info/dependency_links.txt
+NavSysLib.egg-info/top_level.txt
