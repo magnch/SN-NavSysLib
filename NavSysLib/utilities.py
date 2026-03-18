@@ -139,6 +139,13 @@ def dms_to_decimal(deg, minutes, seconds, sign=1):
     """
     return sign * (abs(deg) + minutes / 60 + seconds / 3600)
 
+def dm_to_decimal(deg, minutes, sign=1):
+    """
+    Convert Degrees and Decimal Minutes to decimal degrees.
+    sign = +1 or -1
+    """
+    return sign * (abs(deg) + minutes / 60)
+
 
 def decimal_to_dms(decimal_deg):
     """
@@ -337,6 +344,11 @@ def az_el_range_to_enu(az_deg, el_deg, range_m):
     return e, n, u
 
 
+###############################################################################
+# E3
+###############################################################################
+
+
 # ---------------------------------------------------------------------
 # Datum transformations
 # ---------------------------------------------------------------------
@@ -348,7 +360,7 @@ def molodensky_transform(lat_rad, lon_rad, h,
     lat_rad, lon_rad in radians, h in meters.
     da, df are the changes in the semi-major axis and flattening.
     dX, dY, dZ are the translation parameters in meters.
-    Returns transformed (lat_rad, lon_rad, h).
+    Returns transformed (lat_rad, lon_rad, h, d_lat, d_lon, d_h).
     """
 
     sin_lat = np.sin(lat_rad)
@@ -363,7 +375,7 @@ def molodensky_transform(lat_rad, lon_rad, h,
     d_lon = (-dX * sin_lon + dY * cos_lon) / ((RN + h) * cos_lat)
     d_h = dX * cos_lat * cos_lon + dY * cos_lat * sin_lon + dZ * sin_lat - da * (a/RN) + df * (b/a) * RN * sin_lat**2
     
-    return lat_rad + d_lat, lon_rad + d_lon, h + d_h
+    return lat_rad + d_lat, lon_rad + d_lon, h + d_h, d_lat, d_lon, d_h
 
 def ecef_datum_transform(lat_rad, lon_rad, h, dX, dY, dZ, a2, f2, a1=WGS84_A, f1=WGS84_F):
     """Convert to datum 2 with parameters a, f and translation dX, dY, dZ from datum 1,
@@ -374,3 +386,64 @@ def ecef_datum_transform(lat_rad, lon_rad, h, dX, dY, dZ, a2, f2, a1=WGS84_A, f1
     y2 = y1 + dY
     z2 = z1 + dZ
     return ecef_to_llh(x2, y2, z2, a=a2, f=f2)
+
+
+# ---------------------------------------------------------------------
+# Great circle navigation
+# ---------------------------------------------------------------------
+
+def orthodrome(lat1, lon1, lat2, lon2, radius=6371000):
+    """Calculate orthodrome distance, departure heading and arrival heading between two points given in radians."""
+    # Use spherical Earth model
+    R = radius # m
+    cos_theta = np.cos(lat2) * np.cos(lon1 - lon2) * np.cos(lat1) + np.sin(lat2) * np.sin(lat1)
+    theta = np.arccos(cos_theta)
+    distance = R * theta
+
+    departure_heading = np.arctan2(np.cos(lat2) * np.sin(lon2 - lon1),
+                                  -np.cos(lat2) * np.cos(lon1 - lon2) * np.sin(lat1) + np.sin(lat2) * np.cos(lat1))
+    arrival_heading = np.arctan2(-np.sin(lon1 - lon2) * np.cos(lat1),
+                                np.sin(lat2) * np.cos(lon1 - lon2) * np.cos(lat1) - np.cos(lat2) * np.sin(lat1))
+
+    # Convert headings to degrees
+    departure_heading = rad2deg(departure_heading)
+    arrival_heading = rad2deg(arrival_heading)
+
+    return distance, departure_heading, arrival_heading
+
+def _sigma(lat):
+    """Calculate the sigma parameter for loxodrome distance calculation."""
+    return np.log(np.tan(lat/2 + np.pi/4))
+
+def loxodrome(lat1, lon1, lat2, lon2, radius=6371000):
+    """Calculate loxodrome distance and bearing between two points given in radians."""
+    # Use spherical Earth model
+    R = radius # m
+
+    bearing = np.arctan2(lon2 - lon1, _sigma(lat2) - _sigma(lat1))
+    distance = R * np.abs( (lat2 - lat1) / np.cos(bearing) )
+
+    # Convert bearing to degrees
+    bearing = rad2deg(bearing)
+
+    return distance, bearing
+
+
+###############################################################################
+# E4
+###############################################################################
+
+# Angular translation for Earth during 24 hours, in radians
+earth_alpha = 2 * np.pi / (365.25)
+earth_rot_rate_approx = (2 * np.pi + earth_alpha) / (24 * 60 * 60)  # rad/s, approximate
+earth_rot_rate = 7.2921151467E-5 # rad/s, IS-GPS-200 standard value
+
+def orbital_period(A, mu=3.986005E14):
+    """Calculate orbital period T in seconds for semi-major axis A in meters."""
+    return 2.0 * np.pi * np.sqrt((A ** 3) / mu)
+
+def semimajor_axis(T, mu=3.986005E14):
+    """Calculate semi-major axis A in meters for orbital period T in seconds."""
+    return ( (T / (2.0 * np.pi))**2 * mu )**(1/3)
+
+

@@ -9,3 +9,5 @@ NavSysLib.egg-info/PKG-INFO
 NavSysLib.egg-info/SOURCES.txt
 NavSysLib.egg-info/dependency_links.txt
 NavSysLib.egg-info/top_level.txt
+test/test_Coords.py
+test/test_utilities.py

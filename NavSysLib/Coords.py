@@ -40,6 +40,21 @@ class WGS84Coords:
                                 lon_dms[2], lon_sign)
 
         return cls(lat, lon, alt)
+    
+    @classmethod
+    def from_dm(cls, lat_dm, lon_dm, alt=0.0):
+        """
+        lat_dm = (deg, min, 'N'/'S')
+        lon_dm = (deg, min, 'E'/'W')
+        """
+
+        lat_sign = 1 if lat_dm[2].upper() == 'N' else -1
+        lon_sign = 1 if lon_dm[2].upper() == 'E' else -1
+
+        lat = dm_to_decimal(lat_dm[0], lat_dm[1], lat_sign)
+        lon = dm_to_decimal(lon_dm[0], lon_dm[1], lon_sign)
+
+        return cls(lat, lon, alt)
 
     @classmethod
     def from_ecef(cls, x, y, z, method='bowring'):
@@ -74,6 +89,27 @@ class WGS84Coords:
     def to_ecef(self):
         lat_rad, lon_rad, h = self.to_radians()
         return llh_to_ecef(lat_rad, lon_rad, h)
+    
+    def molodensky_transform(self, da, df, dx, dy, dz):
+        """Returns new WGS84Coords transformed by Molodensky transformation with given parameters."""
+        lat_rad, lon_rad, h = self.to_radians()
+        new_lat_rad, new_lon_rad, new_h, d_lat, d_lon, d_h = molodensky_transform(lat_rad, lon_rad, h,
+                                                              da, df, dx, dy, dz)
+        
+        print(f"d_lat: {rad2deg(d_lat)} deg, d_lon: {rad2deg(d_lon)} deg, d_h: {d_h} m")
+
+        return WGS84Coords(rad2deg(new_lat_rad),
+                           rad2deg(new_lon_rad),
+                           new_h)
+
+    def translate_ecef(self, dx, dy, dz):
+        """Returns tuple with ECEF coords translated by given dx, dy, dz in ECEF coordinates."""
+        x, y, z = self.to_ecef()
+        x2 = x + dx
+        y2 = y + dy
+        z2 = z + dz
+        return (x2, y2, z2)
+    
 
     # ---------------------------------------------------------
     # Distance
@@ -92,6 +128,20 @@ class WGS84Coords:
         delta_lon_rad = lon2_rad - lon1_rad
         circumference = wgs84_circumference_at_lat(lat1_rad)
         return circumference * (delta_lon_rad / (2 * np.pi))
+
+    def orthodrome_to(self, other, radius=6371000):
+        """Return distance, initial bearing and final bearing in degrees along the orthodrome (great circle) between self and other."""
+        lat1_rad, lon1_rad, _ = self.to_radians()
+        lat2_rad, lon2_rad, _ = other.to_radians()
+
+        return orthodrome(lat1_rad, lon1_rad, lat2_rad, lon2_rad, radius=radius)
+
+    def loxodrome_to(self, other, radius=6371000):
+        """Return distance and bearing in degrees along the loxodrome (rhumb line) between self and other."""
+        lat1_rad, lon1_rad, _ = self.to_radians()
+        lat2_rad, lon2_rad, _ = other.to_radians()
+        
+        return loxodrome(lat1_rad, lon1_rad, lat2_rad, lon2_rad, radius=radius)
 
     # ---------------------------------------------------------
     # Azimuth & Elevation
