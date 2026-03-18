@@ -433,17 +433,109 @@ def loxodrome(lat1, lon1, lat2, lon2, radius=6371000):
 # E4
 ###############################################################################
 
-# Angular translation for Earth during 24 hours, in radians
-earth_alpha = 2 * np.pi / (365.25)
-earth_rot_rate_approx = (2 * np.pi + earth_alpha) / (24 * 60 * 60)  # rad/s, approximate
-earth_rot_rate = 7.2921151467E-5 # rad/s, IS-GPS-200 standard value
+# ---------------------------------------------------------------------
+# Polar coordinates
+# ---------------------------------------------------------------------
 
-def orbital_period(A, mu=3.986005E14):
+def r0(A, e, phi0):
+    """Calculate r0 parameter for polar coordinates from eccentricity e and latitude of origin phi0 in radians."""
+    return A * (1 - e**2) / (1 + e * np.cos(phi0))
+
+def polar_to_cartesian(r, theta, r0):
+    """Convert polar coordinates (r, theta) to Cartesian (x, y) using r0 parameter."""
+    x = r * np.cos(theta) + r0
+    y = r * np.sin(theta)
+    return x, y
+
+
+# ---------------------------------------------------------------------
+# Orbital mechanics
+# ---------------------------------------------------------------------
+
+
+# Angular translation for Earth during 24 hours, in radians
+EARTH_ALPHA = 2 * np.pi / (365.25)
+EARTH_ROT_RATE_APPROX = (2 * np.pi + EARTH_ALPHA) / (24 * 60 * 60)  # rad/s, approximate
+EARTH_ROT_RATE = 7.2921151467E-5 # rad/s, IS-GPS-200 standard value
+RIGHT_ASCENSION_RATE = deg2rad(-0.04) / (24 * 60 * 60) # rad/s, rate of right ascension for GPS orbits
+
+MU = 3.986005E14 # m^3/s^2, standard gravitational parameter for Earth
+
+def orbital_period(A, mu=MU):
     """Calculate orbital period T in seconds for semi-major axis A in meters."""
     return 2.0 * np.pi * np.sqrt((A ** 3) / mu)
 
-def semimajor_axis(T, mu=3.986005E14):
+def semimajor_axis(T, mu=MU):
     """Calculate semi-major axis A in meters for orbital period T in seconds."""
     return ( (T / (2.0 * np.pi))**2 * mu )**(1/3)
 
 
+def rarm(t, t0=0, initial_rarm=0, earth_rot_rate=EARTH_ROT_RATE):
+    """Calculate Right Ascension of Reference Meridian in radians at time t (seconds) since epoch t0."""
+    return initial_rarm + (earth_rot_rate * (t - t0))
+
+def raan(t, t0=0, rate_deg_per_day=-0.04, initial_raan=0):
+    """Calculate Right Ascension of Ascending Node in radians at time t (seconds) since epoch t0."""
+    rate_rad_per_sec = np.deg2rad(rate_deg_per_day) / (24 * 60 * 60)
+    return initial_raan + rate_rad_per_sec * (t - t0)
+
+def lan(t, t0=0, initial_raan=0, rate_deg_per_day=-0.04, initial_rarm=0, earth_rot_rate=EARTH_ROT_RATE):
+    """Calculate Longitude of Ascending Node in radians at time t (seconds) since epoch t0."""
+    return raan(t, t0=t0, rate_deg_per_day=rate_deg_per_day, initial_raan=initial_raan) - rarm(t, t0=t0, initial_rarm=initial_rarm, earth_rot_rate=earth_rot_rate)
+
+def mean_anomaly(t, t_p, n):
+    """Calculate mean anomaly M (rad) from perigee time t_p and mean motion n (rad/s)."""
+    return n * (t - t_p)
+
+def mean_anomaly_M0(M0, d_t, eta):
+    """Calculate mean anomaly M (rad) from reference epoch t_oe, M0 and mean motion n (rad/s)."""
+    return M0 + eta * d_t
+
+def mean_angular_velocity(a, d_eta=0.0, mu=MU):
+    """Calculate mean angular velocity omega (eta) in rad/s from semi-major axis a in meters."""
+    return np.sqrt(mu / (a ** 3)) + d_eta
+
+def wrap_angle_2pi(angle_rad):
+    """Wrap an angle in radians to [0, 2*pi)."""
+    return angle_rad % (2.0 * np.pi)
+
+def perigee_tow_from_toe(toe, M0, n):
+    """Return perigee TOW (s) in the same cycle branch as toe from toe, M0 and mean motion n."""
+    if n == 0:
+        raise ValueError("mean motion n must be non-zero")
+    return toe - (M0 / n)
+
+def first_perigee_tow_in_week(toe, M0, n, week_seconds=604800.0):
+    """Return the earliest perigee TOW (s) inside GPS week [0, week_seconds)."""
+    t_ref = perigee_tow_from_toe(toe, M0, n)
+    T = (2.0 * np.pi) / abs(n)
+
+    if T >= week_seconds:
+        return t_ref % week_seconds
+
+    # Earliest non-negative perigee epoch among all t_ref + k*T in the week.
+    return t_ref % T
+
+def eccentric_anomaly(M, e, tol=1e-8, max_iter=100):
+    """Calculate eccentric anomaly E from mean anomaly M and eccentricity e using Newton's method."""
+    E = M  # initial guess
+    for _ in range(max_iter):
+        f = E - e * np.sin(E) - M
+        f_prime = 1 - e * np.cos(E)
+        E_new = E - f / f_prime
+        if abs(E_new - E) < tol:
+            return E_new
+        E = E_new
+    return E  # return last estimate if max iterations reached
+
+def true_anomaly(E, e):
+    """Calculate true anomaly nu from eccentric anomaly E and eccentricity e."""
+    return 2 * np.arctan(np.sqrt((1 + e) / (1 - e)) * np.tan(E / 2))
+
+def orbital_radius(a, e, E):
+    """Calculate orbital radius r from semi-major axis a, eccentricity e and eccentric anomaly E."""
+    return a * (1 - e * np.cos(E))
+
+def gps_delta_t(wn1, tow1, wn2, tow2):
+    """Calculate time difference in seconds between two GPS epochs given by week number and TOW."""
+    return (wn1 - wn2) * 604800.0 + (tow1 - tow2)
