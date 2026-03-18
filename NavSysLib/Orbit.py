@@ -183,7 +183,7 @@ class Orbit:
             i_0 = src.i_0
             if tow is not None and wn is not None and arg_lat is not None:
                 i_0 += src.idot * self.delta_t(wn, tow)
-            i_0 += src.C_ic * np.cos(2 * arg_lat) + src.C_is * np.sin(2 * arg_lat)
+            i_0 += src.C_ic * np.cos(2 * arg_lat) + src.C_is * np.sin(2 * arg_lat) # pyright: ignore[reportOperatorIssue]
             return i_0
         return src.delta_i
 
@@ -300,7 +300,7 @@ class Orbit:
         """Return first perigee TOW (s) within GPS week bounds."""
         return first_perigee_tow_in_week(self.reference_tow(), self.mean_anomaly_reference(), self.mean_angular_velocity(), week_seconds=week_seconds)
 
-    def wgs84_position(self, wn=0, tow=0) -> tuple:
+    def wgs84_ecef_position(self, wn=0, tow=0) -> tuple:
         """Return ECEF position (x, y, z) in meters, accounting for harmonic corrections."""
         a = self.semimajor_axis()
         eta = self.mean_angular_velocity()

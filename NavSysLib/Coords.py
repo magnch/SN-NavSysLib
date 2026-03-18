@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import numpy as np
 from .utilities import *
+from .Orbit import *
 
 
 @dataclass
@@ -62,6 +63,13 @@ class WGS84Coords:
         return cls(rad2deg(lat_rad),
                    rad2deg(lon_rad),
                    h)
+    
+    @classmethod
+    def from_orbit(cls, orbit: Orbit, wn: int = 0, tow: int = 0):
+        """Construct WGS84Coords from given Orbit at given time (wn, tow)."""
+        x, y, z = orbit.wgs84_ecef_position(wn, tow)
+        return cls.from_ecef(x, y, z)
+    
 
     # ---------------------------------------------------------
     # Representations
