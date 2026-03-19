@@ -7,6 +7,7 @@ from .utilities import *
 @dataclass
 class Ephemeris:
     """Class representing satellite ephemeris data."""
+    sv_num: int = 0  # Satellite number
     sqrt_a: float = 0.0  # Square root of semi-major axis (m^0.5)
     t_oe: float = 0.0  # Reference epoch time-of-ephemeris (s)
     wn: int = 0  # GPS week number
@@ -25,6 +26,59 @@ class Ephemeris:
     C_is: float = 0.0  # Amplitude of the sine harmonic correction
     idot: float = 0.0  # Rate of change of inclination (rad/s)
     iode: int = 0  # Issue of ephemeris data (0-255)
+
+    @classmethod
+    def from_eph_line(cls, eph_line: str, reference_wn: Optional[int] = None) -> "Ephemeris":
+        """Create Ephemeris from one tab-separated line in a .eph file.
+
+        The parser uses the unscaled-value columns documented in the exercise file format.
+        Field 4 is a 10-bit week number; pass reference_wn (e.g. 2056) to
+        expand it to the nearest full GPS week.
+        """
+        if eph_line is None:
+            raise ValueError("eph_line cannot be None")
+
+        parts = [p.strip() for p in eph_line.strip().split("\t") if p.strip() != ""]
+        if len(parts) < 79:
+            raise ValueError(f"Invalid .eph line: expected at least 79 fields, got {len(parts)}")
+
+        def field(index_1_based: int) -> str:
+            return parts[index_1_based - 1]
+
+        def expand_week_number(wn_10bit: int, wn_reference: int) -> int:
+            base = (wn_reference - (wn_reference % 1024)) + wn_10bit
+            candidates = (base - 1024, base, base + 1024)
+            return min(candidates, key=lambda w: abs(w - wn_reference))
+
+        iode_sf2 = int(field(2), 0)
+        iode_sf3 = int(field(3), 0)
+        if iode_sf2 != iode_sf3:
+            raise ValueError(f"Inconsistent IODE in fields 2 and 3: {iode_sf2} != {iode_sf3}")
+
+        wn_10bit = int(field(4), 0) & 0x3FF
+        wn = wn_10bit if reference_wn is None else expand_week_number(wn_10bit, reference_wn)
+
+        return cls(
+            sv_num=int(field(1), 0),
+            wn=wn,
+            t_oe=float(field(7)),
+            sqrt_a=float(field(34)),
+            d_eta=float(field(37)),
+            M_0=float(field(40)),
+            e=float(field(43)),
+            omega=float(field(46)),
+            i_0=float(field(49)),
+            idot=float(field(52)),
+            Omega_0=float(field(55)),
+            Omega_dot=float(field(58)),
+            C_uc=float(field(61)),
+            C_us=float(field(64)),
+            C_rc=float(field(67)),
+            C_rs=float(field(70)),
+            C_ic=float(field(73)),
+            C_is=float(field(76)),
+            iode=iode_sf2,
+        )
 
 
 @dataclass
@@ -156,6 +210,12 @@ class Orbit:
         )
         return cls(ephemeris=eph, mu=mu)
 
+    @classmethod
+    def from_eph_line(cls, eph_line: str, mu: float = MU, reference_wn: Optional[int] = None):
+        """Create Orbit from one tab-separated line in a .eph file."""
+        eph = Ephemeris.from_eph_line(eph_line, reference_wn=reference_wn)
+        return cls(ephemeris=eph, mu=mu)
+
     def _source(self):
         """Return preferred source object (ephemeris first, then almanac)."""
         if self.ephemeris is not None:
@@ -191,7 +251,7 @@ class Orbit:
         """Return right ascension of ascending node in radians, accounting for Omega_dot time evolution."""
         Omega_0 = self._source().Omega_0
         if self.ephemeris is not None and tow is not None and wn is not None:
-            Omega_0 += self.ephemeris.Omega_dot * self.delta_t(self.ephemeris.wn, tow)
+            Omega_0 += self.ephemeris.Omega_dot * self.delta_t(wn, tow)
         return Omega_0
     
     def longitude_of_ascending_node(self, wn: int, tow: float) -> float:
@@ -300,7 +360,7 @@ class Orbit:
         """Return first perigee TOW (s) within GPS week bounds."""
         return first_perigee_tow_in_week(self.reference_tow(), self.mean_anomaly_reference(), self.mean_angular_velocity(), week_seconds=week_seconds)
 
-    def wgs84_ecef_position(self, wn=0, tow=0) -> tuple:
+    def wgs84_ecef_position(self, wn: int = 0, tow: float = 0.0) -> tuple:
         """Return ECEF position (x, y, z) in meters, accounting for harmonic corrections."""
         a = self.semimajor_axis()
         eta = self.mean_angular_velocity()
@@ -310,15 +370,50 @@ class Orbit:
         phi_0 = self.true_anomaly(E)
         phi = self.argument_of_latitude(phi_0)
         u = self.argument_of_latitude_corrected(phi)
-        r = self.orbital_radius(E)
+        r = self.orbital_radius(E, arg_lat=phi)
         i = self.inclination(wn, tow, arg_lat=phi)
         Omega = self.longitude_of_ascending_node(wn, tow)
 
-        print(f"a: {a}\neta: {eta}\nd_t: {d_t}\nM: {M}\nE: {E}\nphi_0: {phi_0}\nphi: {phi}\nu: {u}\nr: {r}\ni: {i}\nOmega: {Omega}")
+        #print(f"a: {a}\neta: {eta}\nd_t: {d_t}\nM: {M}\nE: {E}\nphi_0: {phi_0}\nphi: {phi}\nu: {u}\nr: {r}\ni: {i}\nOmega: {Omega}")
 
         ecef_vec = np.array([r * np.cos(u), r * np.sin(u), 0.0]) @ rot_x(-i) @ rot_z(-Omega)
         return tuple(ecef_vec)
 
+    def get_tx_time_from_ref_point(self, ref_wn: int, ref_tow: float, ref_pos_ecef: tuple, epsilon: float, max_iterations: int=100) -> float:
+        """Calculate satellite transmission time (s) corresponding to signal reception at given reference point."""
+        c = 299792458.0 # Speed of light in m/s
+        t_rx = ref_tow + ref_wn * 604800.0
+        d_prime = 0.0
+        t_tx = t_rx
+        iterations = 0
+        for i in range(max_iterations):
+            d = d_prime
+            t_tx = t_rx - d / c
+            s = self.wgs84_ecef_position(wn=ref_wn, tow=float(t_tx % 604800.0))
+            d_Omega = EARTH_ROT_RATE * (d / c)
+            s = s @ rot_z(d_Omega)
+            d_prime = float(np.linalg.norm(np.array(s) - np.array(ref_pos_ecef)))
+            print(f"Iteration {i+1}: t_tx={t_tx:.6f} s, s = {s} m, d_Omega={d_Omega:.9e} rad, d={d:.3f} m, d_prime={d_prime:.3f} m")
+            iterations = i + 1
+            if abs(d_prime - d) < epsilon:
+                break
+        print(f"Transmission time calculation converged in {iterations} iterations with final distance {d_prime:.3f} m")
+        return float(t_tx)
 
+    def get_pos_at_tx_time(self, t_tx: float, ref_wn: Optional[int] = None, ref_tow: Optional[float] = None) -> tuple:
+        """Return ECEF position (x, y, z) in meters at given transmission time.
 
+        If ref_wn and ref_tow are provided, the position is rotated into the
+        receiver ECEF frame at reception epoch (Sagnac correction).
+        """
+        wn = int(t_tx // 604800)
+        tow = t_tx % 604800
+        pos = np.array(self.wgs84_ecef_position(wn=wn, tow=tow), dtype=float)
 
+        if ref_wn is not None and ref_tow is not None:
+            t_rx = float(ref_tow) + float(ref_wn) * 604800.0
+            tau = t_rx - float(t_tx)
+            d_Omega = EARTH_ROT_RATE * tau
+            pos = pos @ rot_z(d_Omega)
+
+        return tuple(pos)

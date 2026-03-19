@@ -270,7 +270,7 @@ def llh_to_ecef(lat_rad, lon_rad, h,
     y = (RN + h) * cos_lat * np.sin(lon_rad)
     z = ((1 - f)**2 * RN + h) * sin_lat
 
-    print(f"RN: {RN}, f: {f}")
+    #print(f"RN: {RN}, f: {f}")
 
     return x, y, z
 
