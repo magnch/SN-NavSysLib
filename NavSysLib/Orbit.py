@@ -360,7 +360,7 @@ class Orbit:
         """Return first perigee TOW (s) within GPS week bounds."""
         return first_perigee_tow_in_week(self.reference_tow(), self.mean_anomaly_reference(), self.mean_angular_velocity(), week_seconds=week_seconds)
 
-    def wgs84_ecef_position(self, wn: int = 0, tow: float = 0.0) -> tuple:
+    def wgs84_ecef_position(self, wn: int = 0, tow: float = 0.0, inertial: bool = False, return_coords: bool = False):
         """Return ECEF position (x, y, z) in meters, accounting for harmonic corrections."""
         a = self.semimajor_axis()
         eta = self.mean_angular_velocity()
@@ -375,9 +375,17 @@ class Orbit:
         Omega = self.longitude_of_ascending_node(wn, tow)
 
         #print(f"a: {a}\neta: {eta}\nd_t: {d_t}\nM: {M}\nE: {E}\nphi_0: {phi_0}\nphi: {phi}\nu: {u}\nr: {r}\ni: {i}\nOmega: {Omega}")
+        if inertial:
+            ecef_vec = np.array([r * np.cos(u), r * np.sin(u), 0.0]) @ rot_x(-i)
+        else:
+            ecef_vec = np.array([r * np.cos(u), r * np.sin(u), 0.0]) @ rot_x(-i) @ rot_z(-Omega)
+        ecef_tuple = tuple(ecef_vec)
 
-        ecef_vec = np.array([r * np.cos(u), r * np.sin(u), 0.0]) @ rot_x(-i) @ rot_z(-Omega)
-        return tuple(ecef_vec)
+        if return_coords:
+            from .Coords import WGS84Coords
+            return WGS84Coords.from_ecef(*ecef_tuple)
+        
+        return ecef_tuple
 
     def get_tx_time_from_ref_point(self, ref_wn: int, ref_tow: float, ref_pos_ecef: tuple, epsilon: float, max_iterations: int=100) -> float:
         """Calculate satellite transmission time (s) corresponding to signal reception at given reference point."""
@@ -400,7 +408,7 @@ class Orbit:
         print(f"Transmission time calculation converged in {iterations} iterations with final distance {d_prime:.3f} m")
         return float(t_tx)
 
-    def get_pos_at_tx_time(self, t_tx: float, ref_wn: Optional[int] = None, ref_tow: Optional[float] = None) -> tuple:
+    def get_pos_at_tx_time(self, t_tx: float, ref_wn: Optional[int] = None, ref_tow: Optional[float] = None, return_coords: bool = False):
         """Return ECEF position (x, y, z) in meters at given transmission time.
 
         If ref_wn and ref_tow are provided, the position is rotated into the
@@ -416,4 +424,22 @@ class Orbit:
             d_Omega = EARTH_ROT_RATE * tau
             pos = pos @ rot_z(d_Omega)
 
+        if return_coords:
+            from .Coords import WGS84Coords
+            return WGS84Coords.from_ecef(*pos)
+
         return tuple(pos)
+
+    def get_inertial_speed_between_times(self, wn1: int, tow1: float, wn2: int, tow2: float) -> float:
+        """Return inertial speed in m/s between two transmission times."""
+        pos1 = np.array(self.wgs84_ecef_position(wn=wn1, tow=tow1, inertial=True), dtype=float)
+        pos2 = np.array(self.wgs84_ecef_position(wn=wn2, tow=tow2, inertial=True), dtype=float)
+        distance = np.linalg.norm(pos2 - pos1)
+        delta_t = self.delta_t(wn2, tow2) - self.delta_t(wn1, tow1)
+        if delta_t == 0:
+            return 0.0
+        return float(distance / delta_t)
+
+    def get_orbital_plane_params(self):
+        """Return inclination and right ascension of ascending node in radians."""
+        return self.ephemeris.i_0, self.ephemeris.Omega_0

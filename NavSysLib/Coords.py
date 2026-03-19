@@ -151,6 +151,11 @@ class WGS84Coords:
         
         return loxodrome(lat1_rad, lon1_rad, lat2_rad, lon2_rad, radius=radius)
 
+    def ecef_norm(self):
+        """Returns distance from center of Earth to self in meters."""
+        x, y, z = self.to_ecef()
+        return np.sqrt(x**2 + y**2 + z**2)
+
     # ---------------------------------------------------------
     # Azimuth & Elevation
     # ---------------------------------------------------------
@@ -186,6 +191,26 @@ class WGS84Coords:
         y2 = y1 + dy
         z2 = z1 + dz
         return WGS84Coords.from_ecef(x2, y2, z2)
+    
+    def direction_cosines_to(self, other):
+        """Returns direction cosines from self to other in ECEF frame."""
+        x1, y1, z1 = self.to_ecef()
+        x2, y2, z2 = other.to_ecef()
+        dx = x2 - x1
+        dy = y2 - y1
+        dz = z2 - z1
+        norm = np.sqrt(dx**2 + dy**2 + dz**2)
+        if norm == 0:
+            return (0.0, 0.0, 0.0)
+        return (dx / norm, dy / norm, dz / norm)
+
+    def direction_cosines_to_enu(self, other):
+        """Returns direction cosines from self to other in ENU frame."""
+        e, n, u = self.enu_to(other)
+        norm = np.sqrt(e**2 + n**2 + u**2)
+        if norm == 0:
+            return (0.0, 0.0, 0.0)
+        return (e / norm, n / norm, u / norm)
 
     # ---------------------------------------------------------
     # Pretty printing
