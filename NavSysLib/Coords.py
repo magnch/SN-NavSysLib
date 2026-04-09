@@ -156,6 +156,24 @@ class WGS84Coords:
         x, y, z = self.to_ecef()
         return np.sqrt(x**2 + y**2 + z**2)
 
+    def pseudo_range_to(self, other, receiver_delta_t):
+        """Returns pseudo-range in meters from self to other, accounting for clock offset."""
+        c = 299792458  # speed of light in m/s
+        geometric_range = self.distance_to(other)
+        return geometric_range + c * receiver_delta_t
+
+    def unit_vector_to(self, other):
+        """Returns unit vector from self to other in ECEF coordinates."""
+        x1, y1, z1 = self.to_ecef()
+        x2, y2, z2 = other.to_ecef()
+        dx = x2 - x1
+        dy = y2 - y1
+        dz = z2 - z1
+        norm = np.sqrt(dx**2 + dy**2 + dz**2)
+        if norm == 0:
+            return (0.0, 0.0, 0.0)
+        return (dx / norm, dy / norm, dz / norm)
+
     # ---------------------------------------------------------
     # Azimuth & Elevation
     # ---------------------------------------------------------
@@ -173,7 +191,7 @@ class WGS84Coords:
     def az_el_to(self, other):
         """Returns azimuth and elevation in degrees from self to other."""
         e, n, u = self.enu_to(other)
-        print(f"e: {e}, n: {n}, u: {u}")
+        
         return enu_to_az_el(e, n, u)
     
     def az_el_range_to(self, other):
@@ -207,10 +225,241 @@ class WGS84Coords:
     def direction_cosines_to_enu(self, other):
         """Returns direction cosines from self to other in ENU frame."""
         e, n, u = self.enu_to(other)
+        
         norm = np.sqrt(e**2 + n**2 + u**2)
         if norm == 0:
             return (0.0, 0.0, 0.0)
         return (e / norm, n / norm, u / norm)
+
+    def compute_pseudoranges_for_epoch(
+        self,
+        orbits,
+        wn: int,
+        tow: float,
+        clk_offset: float = 0.0,
+        elevation_mask: float = 10.0,
+        epsilon: float = 1e-4
+    ) -> dict:
+        """
+        Computes pseudoranges from this receiver coordinate to a list of satellites for a specific epoch.
+        
+        Args:
+            orbits: A list of Orbit objects or a dictionary mapping SV number to Orbit object.
+            wn: Week Number at signal reception.
+            tow: Time of Week (s) at signal reception.
+            clk_offset: Receiver clock offset in seconds (dt_r). Default is 0.0.
+            elevation_mask: Minimum elevation angle in degrees for a satellite to be included. Default is 10.0.
+            epsilon: Convergence threshold for transmission time in meters.
+            
+        Returns:
+            dict: A dictionary mapping sv_num to a result dict containing:
+                - 'pseudorange': Computed pseudorange in meters
+                - 'true_range': True geometric range in meters
+                - 'elevation': Elevation angle in degrees
+                - 'azimuth': Azimuth angle in degrees
+                - 't_tx': Calculated transmission time
+        """
+        c = 299792458.0  # Speed of light in m/s
+        results = {}
+        
+        orbit_dict = orbits
+        if isinstance(orbits, list):
+            orbit_dict = {}
+            for i, ob in enumerate(orbits):
+                if hasattr(ob, 'ephemeris') and ob.ephemeris is not None:
+                    orbit_dict[ob.ephemeris.sv_num] = ob
+                else:
+                    orbit_dict[i] = ob
+
+        rx_ecef = self.to_ecef()
+        t_rx_total = tow + wn * 604800.0
+        
+        for sv_num, orbit in orbit_dict.items():
+            # 1. Calculate precise transmission time iteratively
+            t_tx_total = orbit.get_tx_time_from_ref_point(
+                ref_wn=wn, 
+                ref_tow=tow, 
+                ref_pos_ecef=rx_ecef, 
+                epsilon=epsilon
+            )
+            
+            # 2. True geometric range based on signal transit time
+            true_range = c * (t_rx_total - t_tx_total)
+            
+            # 3. Calculate elevation/azimuth using Sagnac-corrected satellite position
+            sat_coords_rx_frame = orbit.get_pos_at_tx_time(
+                t_tx=t_tx_total, 
+                ref_wn=wn, 
+                ref_tow=tow, 
+                return_coords=True
+            )
+            
+            azimuth, elevation = self.az_el_to(sat_coords_rx_frame)
+            
+            # 4. Check elevation mask and calculate pseudorange
+            if elevation >= elevation_mask:
+                pseudorange = true_range + c * clk_offset
+                results[sv_num] = {
+                    'pseudorange': float(pseudorange),
+                    'true_range': float(true_range),
+                    'elevation': float(elevation),
+                    'azimuth': float(azimuth),
+                    't_tx': float(t_tx_total)
+                }
+                
+        return results
+        
+
+    # ---------------------------------------------------------
+    # GNSS Positioning
+    # ---------------------------------------------------------
+
+    def get_orbits_from_elevation_mask(self, orbits, wn, tow, elevation_mask):
+        """Returns list of Orbit objects that are above elevation mask at given time."""
+        visible_orbits = []
+        for ob in orbits:
+            t_tx_total = ob.get_tx_time_from_ref_point(ref_wn=wn, ref_tow=tow, ref_pos_ecef=self.to_ecef(), epsilon=1e-4)
+            sat_coords = ob.get_pos_at_tx_time(t_tx=t_tx_total, ref_wn=wn, ref_tow=tow, return_coords=True)
+            _, elevation = self.az_el_to(sat_coords)
+            if elevation >= elevation_mask:
+                visible_orbits.append(ob)
+                print(f"Satellite {ob.ephemeris.sv_num} is visible with elevation {elevation:.2f} deg")
+        return visible_orbits
+    
+    def get_orbits_and_pseudoranges_from_elevation_mask(self, orbits, pseudoranges, wn, tow, elevation_mask):
+        """Returns a list of Orbits and a list of pseudoranges for satellites above elevation mask at given time."""
+        visible_orbits = []
+        visible_pseudoranges = []
+        for ob, pr in zip(orbits, pseudoranges):
+            t_tx_total = ob.get_tx_time_from_ref_point(ref_wn=wn, ref_tow=tow, ref_pos_ecef=self.to_ecef(), epsilon=1e-4)
+            sat_coords = ob.get_pos_at_tx_time(t_tx=t_tx_total, ref_wn=wn, ref_tow=tow, return_coords=True)
+            _, elevation = self.az_el_to(sat_coords)
+            if elevation >= elevation_mask:
+                visible_orbits.append(ob)
+                visible_pseudoranges.append(pr)
+        return visible_orbits, visible_pseudoranges
+
+    def get_H_matrix_from_orbits(self, orbits, wn, tow, elevation_mask, enu=False):        
+        """Returns H matrix for given list of Orbit objects at given time and elevation mask."""
+        visible_orbits = self.get_orbits_from_elevation_mask(orbits, wn, tow, elevation_mask)
+        H = []
+        for ob in visible_orbits:
+            t_tx_total = ob.get_tx_time_from_ref_point(ref_wn=wn, ref_tow=tow, ref_pos_ecef=self.to_ecef(), epsilon=1e-4)
+            sat_coords = ob.get_pos_at_tx_time(t_tx=t_tx_total, ref_wn=wn, ref_tow=tow, return_coords=True)
+            if enu:
+                unit_vec = self.direction_cosines_to_enu(sat_coords)
+            else:
+                unit_vec = self.direction_cosines_to(sat_coords)
+            H.append((-unit_vec[0], -unit_vec[1], -unit_vec[2], 1.0))
+        return np.array(H)
+    
+    def get_gdop_from_orbits(self, orbits, wn, tow, elevation_mask):
+        """Returns GDOP value from given list of Orbit objects at given time and elevation mask."""
+        visible_orbits = self.get_orbits_from_elevation_mask(orbits, wn, tow, elevation_mask)
+        if len(visible_orbits) < 4:
+            print("Not enough visible satellites to compute GDOP.")
+            return float('inf')
+        
+        H = self.get_H_matrix_from_orbits(orbits, wn, tow, elevation_mask, enu=True)
+        M = np.linalg.inv(H.T @ H)
+        gdop_val = gdop(M=M)
+        return gdop_val
+    
+    def get_pdop_from_orbits(self, orbits, wn, tow, elevation_mask):
+        """Returns PDOP value from given list of Orbit objects at given time and elevation mask."""
+        visible_orbits = self.get_orbits_from_elevation_mask(orbits, wn, tow, elevation_mask)
+        if len(visible_orbits) < 4:
+            print("Not enough visible satellites to compute PDOP.")
+            return float('inf')
+        
+        H = self.get_H_matrix_from_orbits(orbits, wn, tow, elevation_mask, enu=True)
+        M = np.linalg.inv(H.T @ H)
+        pdop_val = pdop(M=M)
+        return pdop_val
+    
+    def get_hdop_from_orbits(self, orbits, wn, tow, elevation_mask):
+        """Returns HDOP value from given list of Orbit objects at given time and elevation mask."""
+        visible_orbits = self.get_orbits_from_elevation_mask(orbits, wn, tow, elevation_mask)
+        if len(visible_orbits) < 4:
+            print("Not enough visible satellites to compute HDOP.")
+            return float('inf')
+        
+        H = self.get_H_matrix_from_orbits(orbits, wn, tow, elevation_mask, enu=True)
+        M = np.linalg.inv(H.T @ H)
+        hdop_val = hdop(M=M)
+        return hdop_val
+    
+    def get_vdop_from_orbits(self, orbits, wn, tow, elevation_mask):
+        """Returns VDOP value from given list of Orbit objects at given time and elevation mask."""
+        visible_orbits = self.get_orbits_from_elevation_mask(orbits, wn, tow, elevation_mask)
+        if len(visible_orbits) < 4:
+            print("Not enough visible satellites to compute VDOP.")
+            return float('inf')
+        
+        H = self.get_H_matrix_from_orbits(orbits, wn, tow, elevation_mask, enu=True)
+        M = np.linalg.inv(H.T @ H)
+        vdop_val = vdop(M=M)
+        return vdop_val
+    
+    def get_position_from_orbits_and_pseudoranges(
+        self, orbits, pseudoranges, wn, tow, elevation_mask,
+        num_iter=10, tol=1e-6, initial_guess=None
+    ):
+        import numpy as np
+        c = 299792458.0
+
+        visible_orbits, visible_pseudoranges = self.get_orbits_and_pseudoranges_from_elevation_mask(orbits, pseudoranges, wn, tow, elevation_mask)
+        
+
+        if len(visible_orbits) < 4:
+            return None
+
+        rx = np.array(self.to_ecef(), dtype=float) if initial_guess is None else np.array(initial_guess, dtype=float)
+        bias = 0.0
+
+        for iter_count in range(num_iter):
+            H = []
+            z_measurements = []
+
+            for i, ob in enumerate(visible_orbits):
+                pr = visible_pseudoranges[i]
+                
+                # t_rx = tow (according to local clock)
+                # the true transmission time:
+                t_tx_new = ob.get_tx_time_from_ref_point(ref_wn=wn, ref_tow=tow, ref_pos_ecef=tuple(rx), epsilon=1e-4) # wait, we need an even higher precision
+                
+                sat_coords = ob.get_pos_at_tx_time(t_tx=t_tx_new, ref_wn=wn, ref_tow=tow, return_coords=True)
+                s_pos_eff = np.array(sat_coords.to_ecef(), dtype=float)
+                
+                geom_range = np.linalg.norm(s_pos_eff - rx)
+                
+                unit_vec = (rx - s_pos_eff) / geom_range
+                H.append([unit_vec[0], unit_vec[1], unit_vec[2], 1.0])
+
+                # Construct the absolute pseudo-measurement 'z' (Lecture formulation)
+                z_k = pr - geom_range + (unit_vec[0] * rx[0] + unit_vec[1] * rx[1] + unit_vec[2] * rx[2])
+                z_measurements.append(z_k)
+
+            H = np.array(H)
+            z = np.array(z_measurements)
+            print(f"Iteration {iter_count+1}: H =\n{H}\nz = {z} \nrx = {rx}, bias = {bias}")
+
+            x_new = np.linalg.inv(H.T @ H) @ H.T @ z
+            
+            if np.linalg.norm(x_new[0:3] - rx) < tol:
+                rx = x_new[0:3]
+                bias = x_new[3]
+                print(f"Convergence achieved after {iter_count+1} iterations.")
+                break
+
+            rx = x_new[0:3]
+            bias = x_new[3]
+
+        x_hat = np.array([rx[0], rx[1], rx[2], bias])
+        print(f"Estimate of Receiver Position: ({rx[0]:.3f} m, {rx[1]:.3f} m, {rx[2]:.3f} m)")
+        print(f"Estimate of Receiver Clock Offset: {bias / c:.6f} s = {1000 * bias / c:.3f} ms")
+        
+        return x_hat
 
     # ---------------------------------------------------------
     # Pretty printing

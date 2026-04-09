@@ -401,9 +401,11 @@ class Orbit:
             d_Omega = EARTH_ROT_RATE * (d / c)
             s = s @ rot_z(d_Omega)
             d_prime = float(np.linalg.norm(np.array(s) - np.array(ref_pos_ecef)))
+            print(f"Iteration {i+1}: t_tx={t_tx:.6f} s, s = {s} m, d_Omega={d_Omega:.9e} rad, d={d:.3f} m, d_prime={d_prime:.3f} m")
             iterations = i + 1
             if abs(d_prime - d) < epsilon:
                 break
+        print(f"Transmission time calculation converged in {iterations} iterations with final distance {d_prime:.3f} m")
         return float(t_tx)
 
     def get_pos_at_tx_time(self, t_tx: float, ref_wn: Optional[int] = None, ref_tow: Optional[float] = None, return_coords: bool = False):
@@ -441,16 +443,3 @@ class Orbit:
     def get_orbital_plane_params(self):
         """Return inclination and right ascension of ascending node in radians."""
         return self.ephemeris.i_0, self.ephemeris.Omega_0
-    
-
-
-# Helper functions
-
-def get_orbits_from_eph_file(eph_file, reference_wn):
-    """Load orbits from ephemeris file, skipping header lines and empty lines."""
-    orbits = []
-    with open(eph_file, 'r') as f:
-        for line in f.readlines():  # Skip header lines
-            if line.strip():
-                orbits.append(Orbit.from_eph_line(line, reference_wn=reference_wn))
-    return orbits
